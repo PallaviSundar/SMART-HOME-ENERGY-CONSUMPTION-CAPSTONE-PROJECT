@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>⚡ Smart Home Energy Forecasting</title>
+  <!-- Libraries -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-decimation"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dayjs"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dayjs/plugin/customParseFormat.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #1e293b;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --accent: #2563eb;
+      --accent-hover: #1e40af;
+      --border: #334155;
+      --accent2: #38bdf8;
+      --green: #22c55e;
+      --yellow: #eab308;
+      --red: #ef4444;
+    }
+    body {
+      font-family: Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      padding: 20px;
+    }
+    h1 { text-align: center; margin-bottom: 20px; }
+    .controls {
+      display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin-bottom: 20px;
+    }
+    .controls input, .controls button {
+      padding: 8px 12px; border-radius: 6px; border: none;
+    }
+    .controls button { background: var(--accent); color: white; cursor: pointer; }
+    .controls button:hover { background: var(--accent-hover); }
+    .kpis { display: flex; justify-content: center; gap: 20px; margin: 20px 0; flex-wrap: wrap; }
+    .item {
+      background: var(--panel); padding: 15px; border-radius: 10px;
+      text-align: center; min-width: 140px;
+    }
+    .label { font-size: 0.9em; color: var(--muted); }
+    .value { font-size: 1.6em; font-weight: bold; margin-top: 5px; }
+    .tooltip { position: relative; display: inline-block; cursor: help; color: var(--accent2); font-weight: bold; margin-left: 4px; }
+    .tooltip .tooltiptext {
+      visibility: hidden; width: 220px; background-color: var(--panel); color: var(--text);
+      text-align: left; border-radius: 6px; padding: 6px 8px; position: absolute; z-index: 1;
+      bottom: 125%; left: 50%; margin-left: -110px; opacity: 0; transition: opacity 0.3s;
+      font-size: 12px; line-height: 1.4; border: 1px solid var(--border);
+    }
+    .tooltip:hover .tooltiptext { visibility: visible; opacity: 1; }
+    .dataset-info { text-align: center; margin: 15px 0; background: var(--panel); padding: 10px; border-radius: 8px; }
+    .forecast-summary { text-align: center; margin: 20px 0; font-size: 1.1em; }
+    .forecast-summary span { font-weight: bold; padding: 5px 10px; border-radius: 6px; }
+    .low { background: var(--green); color: white; }
+    .moderate { background: var(--yellow); color: black; }
+    .high { background: var(--red); color: white; }
+    canvas { background: var(--panel); border-radius: 12px; padding: 10px; }
+    .legend {
+      display: flex; justify-content: center; gap: 20px; margin-top: 10px; font-size: 0.95em;
+    }
+    .legend span {
+      display: flex; align-items: center; gap: 6px;
+    }
+    .legend .box {
+      width: 14px; height: 14px; border-radius: 3px;
+    }
+    .green-box { background: var(--green); }
+    .yellow-box { background: var(--yellow); }
+    .red-box { background: var(--red); }
+  </style>
+</head>
+
+<body>
+  <h1>⚡ Smart Home Energy Forecasting</h1>
+
+  <!-- Controls -->
+  <div class="controls">
+    <input type="file" id="fileInput" />
+    <button id="btnSample">Load Sample Data</button>
+    <button id="btnRun">Run Forecast</button>
+    <button id="btnDownload">Download Forecast</button>
+    <a id="downloadLink" style="display:none;">Download</a>
+  </div>
+
+  <!-- Parameters -->
+  <div class="controls">
+    <label>Horizon (hours): <input id="horizon" type="number" value="24"></label>
+    <label>Backtest (hours): <input id="backtest" type="number" value="72"></label>
+    <label>Days to Load: <input id="daysRange" type="number" value="7" min="1"></label>
+  </div>
+
+  <!-- KPIs -->
+  <div class="kpis">
+    <div class="item">
+      <div class="label">MAE (kW)
+        <span class="tooltip">ℹ
+          <span class="tooltiptext">Mean Absolute Error: average absolute difference between predicted and actual values.</span>
+        </span>
+      </div>
+      <div id="kpiMAE" class="value">—</div>
+    </div>
+    <div class="item">
+      <div class="label">RMSE (kW)
+        <span class="tooltip">ℹ
+          <span class="tooltiptext">Root Mean Squared Error: penalizes larger errors more strongly than MAE.</span>
+        </span>
+      </div>
+      <div id="kpiRMSE" class="value">—</div>
+    </div>
+    <div class="item">
+      <div class="label">MAPE (%)
+        <span class="tooltip">ℹ
+          <span class="tooltiptext">Mean Absolute Percentage Error: error as a percentage of actual values.</span>
+        </span>
+      </div>
+      <div id="kpiMAPE" class="value">—</div>
+    </div>
+  </div>
+
+  <div class="dataset-info" id="datasetInfo">No dataset loaded yet.</div>
+  <div id="forecastSummary" class="forecast-summary"></div>
+  <canvas id="chart" height="120"></canvas>
+
+  <div class="legend">
+    <span><div class="box green-box"></div>Low (&lt; 0.5 kW)</span>
+    <span><div class="box yellow-box"></div>Moderate (&lt; 1.0 kW)</span>
+    <span><div class="box red-box"></div>High (≥ 1.0 kW)</span>
+  </div>
+
+  <script>
+    dayjs.extend(window.dayjs_plugin_customParseFormat);
+    let series = [], forecast = [], chart;
+    const el = id => document.getElementById(id);
+    const fmt = (n, d = 2) => n == null || Number.isNaN(n) ? '—' : n.toFixed(d);
+    const parseNumber = x => { const v = Number(x); return Number.isFinite(v) ? v : NaN; };
+
+    function simulateLSTM(actual, h) {
+      const pred = []; let last = actual[actual.length - 1] || 0;
+      for (let i = 0; i < h; i++) {
+        const trend = (actual[i % actual.length] - last) * 0.05;
+        const noise = (Math.random() - 0.5) * 0.1 * last;
+        const val = last * 0.9 + actual[i % actual.length] * 0.1 + trend + noise;
+        pred.push(Math.max(val, 0)); last = val;
+      }
+      return pred;
+    }
+
+    function toHourly(data) {
+      data.sort((a, b) => new Date(a.t) - new Date(b.t));
+      const buckets = new Map();
+      for (const { t, y } of data) {
+        const hr = dayjs(t).minute(0).second(0).millisecond(0).toISOString();
+        if (!buckets.has(hr)) buckets.set(hr, { sum: 0, n: 0 });
+        const b = buckets.get(hr); b.sum += y; b.n++;
+      }
+      return Array.from(buckets.entries()).map(([k, v]) => ({ t: new Date(k), y: v.sum / v.n }));
+    }
+
+    function backtest(hist, K) {
+      const n = hist.length; if (n < 30) return { mae: NaN, rmse: NaN, mape: NaN };
+      const k = Math.min(K, n - 10);
+      const preds = [], actual = [];
+      for (let i = n - k; i < n; i++) {
+        const p = simulateLSTM(hist.slice(0, i).map(p => p.y), 1)[0];
+        preds.push(p); actual.push(hist[i].y);
+      }
+      const err = actual.map((a, i) => a - preds[i]);
+      const mae = err.reduce((s, e) => s + Math.abs(e), 0) / err.length;
+      const rmse = Math.sqrt(err.reduce((s, e) => s + e * e, 0) / err.length);
+      const mape = 100 * actual.reduce((s, a, i) => s + Math.abs((a - preds[i]) / (a || 1)), 0) / actual.length;
+      return { mae, rmse, mape };
+    }
+
+    // --- Chart builder with color-coded forecast ---
+    function buildChart() {
+      const ctx = el('chart');
+      const lastObserved = series.slice(-100);
+      const labels = lastObserved.map(p => dayjs(p.t).format('MMM D HH:mm'))
+        .concat(forecast.map(p => dayjs(p.t).format('MMM D HH:mm')));
+      const observedVals = lastObserved.map(p => p.y);
+      const forecastVals = forecast.map(p => p.y);
+
+      if (chart) chart.destroy();
+
+      chart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [
+            {
+              label: 'Observed (kW)',
+              data: observedVals,
+              borderColor: '#38bdf8',
+              borderWidth: 2,
+              tension: 0.25,
+              pointRadius: 0
+            },
+            {
+              label: 'Forecast (kW)',
+              data: Array(lastObserved.length).fill(null).concat(forecastVals),
+              borderWidth: 3,
+              tension: 0.25,
+              pointRadius: 0,
+              segment: {
+                borderColor: ctx => {
+                  const idx = ctx.p1DataIndex - lastObserved.length;
+                  const v = forecastVals[idx];
+                  if (v == null) return 'transparent';
+                  if (v < 0.5) return '#22c55e';   // Green
+                  if (v < 1.0) return '#eab308';   // Yellow
+                  return '#ef4444';                // Red
+                },
+              }
+            }
+          ]
+        },
+        options: {
+          responsive: true,
+          interaction: { mode: 'index', intersect: false },
+          plugins: {
+            legend: { labels: { color: '#cbd5e1' } },
+            tooltip: {
+              callbacks: { label: ctx => `${ctx.dataset.label}: ${fmt(ctx.parsed.y, 3)} kW` }
+            },
+            decimation: { enabled: true, algorithm: 'lttb' }
+          },
+          scales: {
+            x: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(255,255,255,0.05)' } },
+            y: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(255,255,255,0.06)' } }
+          }
+        }
+      });
+    }
+
+    function runForecast() {
+      if (!series.length) { alert('Upload or load sample data first.'); return; }
+      const h = Math.max(1, Number(el('horizon').value) || 24);
+      const yhat = simulateLSTM(series.map(p => p.y), h);
+      const start = dayjs(series[series.length - 1].t);
+      forecast = [];
+      for (let i = 1; i <= h; i++) forecast.push({ t: start.add(i, 'hour').toDate(), y: yhat[i - 1] });
+
+      const kpis = backtest(series, Number(el('backtest').value) || 72);
+      el('kpiMAE').textContent = fmt(kpis.mae, 3);
+      el('kpiRMSE').textContent = fmt(kpis.rmse, 3);
+      el('kpiMAPE').textContent = fmt(kpis.mape, 2);
+
+      buildChart();
+      showForecastSummary();
+    }
+
+    function showForecastSummary() {
+      if (!forecast.length) return;
+      const avg = forecast.reduce((s, p) => s + p.y, 0) / forecast.length;
+      let status = '', cls = '';
+      if (avg < 0.5) { status = 'Good (Low Consumption)'; cls = 'low'; }
+      else if (avg < 1.0) { status = 'Moderate Consumption'; cls = 'moderate'; }
+      else { status = 'High Consumption'; cls = 'high'; }
+      el('forecastSummary').innerHTML = `Average Forecast: ${fmt(avg, 3)} kW → <span class="${cls}">${status}</span>`;
+    }
+
+    function showDatasetStats() {
+      if (!series.length) return;
+      const start = dayjs(series[0].t).format("YYYY-MM-DD HH:mm");
+      const end = dayjs(series[series.length - 1].t).format("YYYY-MM-DD HH:mm");
+      el('datasetInfo').innerHTML = `<strong>Dataset loaded</strong><br>
+        Points: ${series.length}<br>Range: ${start} → ${end}`;
+    }
+
+    function downloadForecast() {
+      if (!forecast.length) { alert('Run forecast first.'); return; }
+      const csv = 'datetime,forecast_kW\n' + forecast.map(p => `${dayjs(p.t).format('YYYY-MM-DD HH:mm')},${p.y}`).join('\n');
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const link = el('downloadLink'); link.href = url; link.style.display = 'block'; link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+    }
+
+    function makeSample(days = 7) {
+      const out = []; const now = dayjs().minute(0).second(0).millisecond(0).subtract(days, 'day');
+      for (let i = 0; i < days * 24; i++) {
+        const t = now.add(i, 'hour'); const hour = t.hour();
+        const base = 0.5 + 0.4 * Math.sin((hour - 6) / 24 * 2 * Math.PI) + (hour >= 18 && hour <= 22 ? 0.8 : 0);
+        const noise = (Math.random() - 0.5) * 0.15; const weekendBoost = (t.day() === 0 || t.day() === 6 ? 0.15 : 0);
+        out.push({ t: t.toDate(), y: Math.max(0.2, base + weekendBoost + noise) });
+      }
+      return out;
+    }
+
+    function limitDays(data, days) {
+      if (!days || data.length === 0) return data;
+      const cutoff = dayjs(data[data.length - 1].t).subtract(days, 'day');
+      return data.filter(p => dayjs(p.t).isAfter(cutoff));
+    }
+
+    function parseCSV(csvString) {
+      const data = Papa.parse(csvString, { header: true, skipEmptyLines: true }).data;
+      series = data.map(r => ({
+        t: new Date(r.DateTime || r.datetime || r.Timestamp || r.timestamp),
+        y: parseNumber(r.Global_active_power || r.global_active_power || r.Power || r.power || 0)
+      })).filter(p => !isNaN(p.y));
+      series = toHourly(series);
+      series = limitDays(series, Number(el('daysRange').value) || 7);
+      showDatasetStats(); buildChart();
+    }
+
+    // File loader (CSV, ZIP, XLSX)
+    el('fileInput').addEventListener('change', async e => {
+      const file = e.target.files[0]; if (!file) return;
+      const ext = file.name.split('.').pop().toLowerCase();
+      try {
+        if (ext === 'zip') {
+          const zip = await JSZip.loadAsync(file);
+          const csvFile = Object.values(zip.files).find(f => f.name.endsWith('.csv'));
+          if (csvFile) parseCSV(await csvFile.async('string'));
+        } else if (ext === 'csv') {
+          parseCSV(await file.text());
+        } else if (['xls', 'xlsx'].includes(ext)) {
+          const data = await file.arrayBuffer();
+          const workbook = XLSX.read(data, { type: 'array' });
+          const sheet = workbook.Sheets[workbook.SheetNames[0]];
+          const json = XLSX.utils.sheet_to_json(sheet);
+          series = json.map(r => ({
+            t: new Date(r.DateTime || r.datetime || r.Timestamp || r.timestamp),
+            y: parseNumber(r.Global_active_power || r.global_active_power || r.Power || r.power || 0)
+          })).filter(p => !isNaN(p.y));
+          series = toHourly(series);
+          series = limitDays(series, Number(el('daysRange').value) || 7);
+          showDatasetStats(); buildChart();
+        } else {
+          alert('Unsupported file type. Please upload CSV, XLSX, or ZIP.');
+        }
+      } catch (err) {
+        console.error(err);
+        alert('Error reading file.');
+      }
+    });
+
+    el('btnSample').addEventListener('click', () => { series = makeSample(Number(el('daysRange').value) || 7); showDatasetStats(); buildChart(); });
+    el('btnRun').addEventListener('click', runForecast);
+    el('btnDownload').addEventListener('click', downloadForecast);
+  </script>
+</body>
+</html>
